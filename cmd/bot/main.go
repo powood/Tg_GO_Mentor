@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"html"
 	"log"
@@ -14,6 +15,7 @@ import (
 	"github.com/joho/godotenv"
 	tele "gopkg.in/telebot.v3"
 
+	"interview-bot/internal/ai"
 	"interview-bot/internal/repository"
 	"interview-bot/internal/session"
 )
@@ -32,7 +34,10 @@ func main() {
 	// 2. Инициализация репозитория (источник данных)
 	repo := repository.NewMemoryQuestionRepository()
 	sessionMgr := session.NewManager()
-
+	aiClient := ai.NewGroqClient(os.Getenv("GROQ_API_KEY"))
+	if aiClient == nil {
+		log.Fatal("❌ Ошибка: не удалось инициализировать Groq-клиент")
+	}
 	// 3. Конфигурация клиента Telegram Bot API
 	pref := tele.Settings{
 		Token: token,
@@ -121,9 +126,13 @@ func main() {
 		for _, kp := range q.KeyPoints {
 			text += fmt.Sprintf("• %s\n", html.EscapeString(kp))
 		}
+		answerMenu := &tele.ReplyMarkup{}
+		btnNext := answerMenu.Data("➡️ Другой вопрос", "btn_topic", q.TopicID)
+		btnMenu := answerMenu.Data("📚 Все темы", "btn_main_menu")
+		answerMenu.Inline(answerMenu.Row(btnNext, btnMenu))
 
 		// Отвечаем цитатой на сообщение с вопросом
-		return c.Reply(text, tele.ModeHTML)
+		return c.Reply(text, answerMenu, tele.ModeHTML)
 	})
 	b.Handle(&btnAnswerMyself, func(c tele.Context) error {
 		payload := c.Data()
@@ -182,26 +191,56 @@ func main() {
 		if err != nil {
 			return c.Send("⚠️ Вопрос устарел или не найден. Начни заново через /start.")
 		}
+		// Сбрасываем стейт: ответ принят
 		sessionMgr.ClearState(c.Sender().ID)
 		userAnswer := c.Text()
-
-		resText := fmt.Sprintf(
-			"📝 <b>Твой ответ принят!</b>\n\n"+
-				"<b>Ты ответил:</b>\n<i>«%s»</i>\n\n"+
-				"✅ <b>Эталонный ответ ментора:</b>\n%s\n\n"+
-				"🎯 <b>Ключевые тезисы, которые оцениваются:</b>\n",
-			html.EscapeString(userAnswer),
-			html.EscapeString(q.Answer),
-		)
-		for _, kp := range q.KeyPoints {
-			resText += fmt.Sprintf("• %s\n", html.EscapeString(kp))
+		// Показываем в Telegram плашку "печатает...", пока нейросеть думает
+		_ = c.Notify(tele.Typing)
+		// Отправляем ответ в Groq (Llama 3.3)
+		eval, err := aiClient.Evaluate(context.Background(), *q, userAnswer)
+		var resText string
+		if err != nil {
+			log.Printf("⚠️ Ошибка оценки ИИ: %v", err)
+			// Если нейросеть временно недоступна — отдаем базовый ответ без паники
+			resText = fmt.Sprintf(
+				"📝 <b>Твой ответ принят:</b>\n<i>«%s»</i>\n\n"+
+					"📖 <b>Эталонный ответ ментора:</b>\n%s\n\n"+
+					"🎯 <b>Ключевые тезисы:</b>\n",
+				html.EscapeString(userAnswer),
+				html.EscapeString(q.Answer),
+			)
+			for _, kp := range q.KeyPoints {
+				resText += fmt.Sprintf("• %s\n", html.EscapeString(kp))
+			}
+		} else {
+			// Красивый вердикт от ИИ-ментора
+			status := "🟡 Надо доработать"
+			if eval.IsCorrect {
+				status = "🟢 Ответ зачтен!"
+			}
+			resText = fmt.Sprintf(
+				"📝 <b>Твой ответ:</b>\n<i>«%s»</i>\n\n"+
+					"🏆 <b>Оценка ментора: %d / 10</b> (%s)\n\n"+
+					"💡 <b>Разбор ответа:</b>\n%s\n\n",
+				html.EscapeString(userAnswer),
+				eval.Score,
+				status,
+				html.EscapeString(eval.Feedback),
+			)
+			if len(eval.MissingPoints) > 0 {
+				resText += "⚠️ <b>Что ты упустил:</b>\n"
+				for _, mp := range eval.MissingPoints {
+					resText += fmt.Sprintf("• %s\n", html.EscapeString(mp))
+				}
+				resText += "\n"
+			}
+			resText += fmt.Sprintf("📖 <b>Эталонный ответ:</b>\n%s", html.EscapeString(q.Answer))
 		}
 		resMenu := &tele.ReplyMarkup{}
 		btnNext := resMenu.Data("➡️ Другой вопрос", "btn_topic", state.TopicID)
 		btnMenu := resMenu.Data("📚 Все темы", "btn_main_menu")
 		resMenu.Inline(resMenu.Row(btnNext, btnMenu))
 		return c.Send(resText, resMenu, tele.ModeHTML)
-
 	})
 
 	// 8. Корректное завершение работы (Graceful Shutdown)

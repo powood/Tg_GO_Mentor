@@ -9,6 +9,8 @@ import (
 	"interview-bot/internal/models"
 	"io"
 	"net/http"
+	"net/url"
+	"os"
 	"time"
 )
 
@@ -21,10 +23,21 @@ type GroqClient struct {
 	httpClient *http.Client
 }
 
-func NewGroqClient(apikey string) *GroqClient {
+func NewGroqClient(apiKey string) *GroqClient {
+	transport := &http.Transport{}
+	// Если в .env задан прокси — направляем запросы через него
+	proxyStr := os.Getenv("GROQ_PROXY_URL")
+	if proxyStr != "" {
+		if proxyURL, err := url.Parse(proxyStr); err == nil {
+			transport.Proxy = http.ProxyURL(proxyURL)
+		}
+	}
 	return &GroqClient{
-		apiKey:     apikey,
-		httpClient: &http.Client{Timeout: 15 * time.Second},
+		apiKey: apiKey,
+		httpClient: &http.Client{
+			Transport: transport,
+			Timeout:   30 * time.Second,
+		},
 	}
 }
 
@@ -40,6 +53,7 @@ type groqRequest struct {
 		Type string `json:"type"`
 	} `json:"response_format"`
 	Temperature float64 `json:"temperature"`
+	MaxTokens   int     `json:"max_tokens,omitempty"`
 }
 type groqResponse struct {
 	Choices []struct {
@@ -68,13 +82,15 @@ func (c *GroqClient) Evaluate(ctx context.Context, q models.Question, userAnswer
 		userAnswer,
 	)
 	reqBody := groqRequest{
-		Model: "llama-3.3-70b-versatile",
+		Model: "qwen/qwen3.8-27b", // <-- активная модель на Groq
 		Messages: []groqMessage{
 			{Role: "system", Content: systemPrompt},
 			{Role: "user", Content: userPrompt},
 		},
-		Temperature: 0.2, // низкая температура для точных и строгих оценок
+		Temperature: 0.2,
+		MaxTokens:   300,
 	}
+
 	reqBody.ResponseFormat.Type = "json_object" // заставляем Groq вернуть чистый JSON!
 	jsonBytes, err := json.Marshal(reqBody)
 	if err != nil {
@@ -86,6 +102,8 @@ func (c *GroqClient) Evaluate(ctx context.Context, q models.Question, userAnswer
 	}
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36") // <-- защита от Cloudflare
+
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("ошибка отправки запроса в Groq: %w", err)
