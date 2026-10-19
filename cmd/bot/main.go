@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	tele "gopkg.in/telebot.v3"
 
 	"interview-bot/internal/repository"
+	"interview-bot/internal/session"
 )
 
 func main() {
@@ -29,6 +31,7 @@ func main() {
 
 	// 2. Инициализация репозитория (источник данных)
 	repo := repository.NewMemoryQuestionRepository()
+	sessionMgr := session.NewManager()
 
 	// 3. Конфигурация клиента Telegram Bot API
 	pref := tele.Settings{
@@ -47,6 +50,9 @@ func main() {
 	menu := &tele.ReplyMarkup{}
 	btnTopic := menu.Data("Тема", "btn_topic")
 	btnShowAnswer := menu.Data("Показать ответ", "btn_show_answer")
+	btnAnswerMyself := menu.Data("Ответить самому", "btn_answer_myself")
+	btnCancelAnswer := menu.Data("Отменить", "btn_cancel_answer")
+	btnMainMenu := menu.Data("Все темы", "btn_main_menu")
 
 	// 5. Хендлер команды /start — главное меню с темами
 	b.Handle("/start", func(c tele.Context) error {
@@ -79,12 +85,13 @@ func main() {
 
 		// Локальная клавиатура под конкретным вопросом
 		qMenu := &tele.ReplyMarkup{}
+		btnAnswerMyself := qMenu.Data("✍️ Ответить самому", "btn_answer_myself", fmt.Sprintf("%s:%d", topicID, q.ID))
 		btnAnswer := qMenu.Data("💡 Показать ответ", "btn_show_answer", strconv.Itoa(q.ID))
 		btnNext := qMenu.Data("➡️ Другой вопрос", "btn_topic", topicID)
 
 		qMenu.Inline(
-			qMenu.Row(btnAnswer),
-			qMenu.Row(btnNext),
+			qMenu.Row(btnAnswerMyself),
+			qMenu.Row(btnAnswer, btnNext),
 		)
 
 		text := fmt.Sprintf(
@@ -117,6 +124,84 @@ func main() {
 
 		// Отвечаем цитатой на сообщение с вопросом
 		return c.Reply(text, tele.ModeHTML)
+	})
+	b.Handle(&btnAnswerMyself, func(c tele.Context) error {
+		payload := c.Data()
+		parts := strings.Split(payload, ":")
+		if len(parts) != 2 {
+			return c.Send("⚠️ Ошибка данных вопроса.")
+
+		}
+		topicID := parts[0]
+		qID, err := strconv.Atoi(parts[1])
+		if err != nil {
+			return c.Send("⚠️ Некорректный ID вопроса.")
+
+		}
+
+		if _, err := repo.GetQuestionByID(qID); err != nil {
+
+			return c.Send("⚠️ Вопрос не найден.")
+
+		}
+		sessionMgr.SetAnswering(c.Sender().ID, topicID, qID)
+		cancelMenu := &tele.ReplyMarkup{}
+		btnCancel := cancelMenu.Data("❌ Отмена", "btn_cancel_answer", topicID)
+		cancelMenu.Inline(cancelMenu.Row(btnCancel))
+		promptText := "🎙️ <b>Твой выход!</b>\n\n" +
+			"Отправь свой ответ следующим сообщением — <b>текстом</b> или <b>голосовым</b> 🎤.\n\n" +
+			"Постарайся вспомнить ключевые детали (как на реальном собеседовании)."
+		return c.Send(promptText, cancelMenu, tele.ModeHTML)
+	})
+	b.Handle(&btnCancelAnswer, func(c tele.Context) error {
+		sessionMgr.ClearState(c.Sender().ID)
+		topicID := c.Data()
+		menuBack := &tele.ReplyMarkup{}
+		btnNext := menuBack.Data("➡️ Другой вопрос", "btn_topic", topicID)
+		btnMenu := menuBack.Data("📚 Все темы", "btn_main_menu")
+		menuBack.Inline(menuBack.Row(btnNext, btnMenu))
+		return c.Send("Окей, отменили! Можешь взять другой вопрос или вернуться к темам:", menuBack, tele.ModeHTML)
+	})
+	b.Handle(&btnMainMenu, func(c tele.Context) error {
+		topics := repo.GetTopics()
+		userMenu := &tele.ReplyMarkup{}
+		var rows []tele.Row
+		for _, t := range topics {
+			btn := userMenu.Data("📚 "+t.Title, "btn_topic", t.ID)
+			rows = append(rows, userMenu.Row(btn))
+		}
+		userMenu.Inline(rows...)
+		return c.Send("📚 <b>Все темы:</b>", userMenu, tele.ModeHTML)
+	})
+	b.Handle(tele.OnText, func(c tele.Context) error {
+		state, ok := sessionMgr.ReadState(c.Sender().ID)
+		if !ok || !state.IsAnswering {
+			return c.Send("👋 Чтобы начать тренировку, нажми /start и выбери тему собеседования!")
+		}
+		q, err := repo.GetQuestionByID(state.QuestionID)
+		if err != nil {
+			return c.Send("⚠️ Вопрос устарел или не найден. Начни заново через /start.")
+		}
+		sessionMgr.ClearState(c.Sender().ID)
+		userAnswer := c.Text()
+
+		resText := fmt.Sprintf(
+			"📝 <b>Твой ответ принят!</b>\n\n"+
+				"<b>Ты ответил:</b>\n<i>«%s»</i>\n\n"+
+				"✅ <b>Эталонный ответ ментора:</b>\n%s\n\n"+
+				"🎯 <b>Ключевые тезисы, которые оцениваются:</b>\n",
+			html.EscapeString(userAnswer),
+			html.EscapeString(q.Answer),
+		)
+		for _, kp := range q.KeyPoints {
+			resText += fmt.Sprintf("• %s\n", html.EscapeString(kp))
+		}
+		resMenu := &tele.ReplyMarkup{}
+		btnNext := resMenu.Data("➡️ Другой вопрос", "btn_topic", state.TopicID)
+		btnMenu := resMenu.Data("📚 Все темы", "btn_main_menu")
+		resMenu.Inline(resMenu.Row(btnNext, btnMenu))
+		return c.Send(resText, resMenu, tele.ModeHTML)
+
 	})
 
 	// 8. Корректное завершение работы (Graceful Shutdown)
