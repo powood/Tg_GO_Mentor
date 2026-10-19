@@ -34,10 +34,22 @@ func main() {
 	// 2. Инициализация репозитория (источник данных)
 	repo := repository.NewMemoryQuestionRepository()
 	sessionMgr := session.NewManager()
-	aiClient := ai.NewGroqClient(os.Getenv("GROQ_API_KEY"))
-	if aiClient == nil {
-		log.Fatal("❌ Ошибка: не удалось инициализировать Groq-клиент")
+	var groqKeys []string
+	if keysStr := os.Getenv("GROQ_API_KEYS"); keysStr != "" {
+		for _, k := range strings.Split(keysStr, ",") {
+			k = strings.TrimSpace(k)
+			if k != "" {
+				groqKeys = append(groqKeys, k)
+			}
+		}
+	} else if key := strings.TrimSpace(os.Getenv("GROQ_API_KEY")); key != "" {
+		groqKeys = append(groqKeys, key)
 	}
+	if len(groqKeys) == 0 {
+		log.Fatal("❌ Ошибка: не задан ни GROQ_API_KEY, ни GROQ_API_KEYS в .env")
+	}
+	aiClient := ai.NewGroqClient(groqKeys)
+
 	// 3. Конфигурация клиента Telegram Bot API
 	pref := tele.Settings{
 		Token: token,
