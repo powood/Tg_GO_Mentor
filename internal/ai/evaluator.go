@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"interview-bot/internal/models"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"os"
@@ -17,6 +18,7 @@ import (
 
 type Evaluator interface {
 	Evaluate(ctx context.Context, q models.Question, userAnswer string) (*models.Evaluation, error)
+	Transcribe(ctx context.Context, audioReader io.Reader, filename string) (string, error)
 }
 
 type GroqClient struct {
@@ -153,4 +155,64 @@ func (c *GroqClient) Evaluate(ctx context.Context, q models.Question, userAnswer
 		return &evaluation, nil // УСПЕХ!
 	}
 	return nil, fmt.Errorf("все API-ключи недоступны: %w", lastErr)
+}
+
+func (c *GroqClient) Transcribe(ctx context.Context, audioReader io.Reader, filename string) (string, error) {
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+	part, err := writer.CreateFormFile("file", filename)
+	if err != nil {
+		return "", fmt.Errorf("ошибка созданияя поля файла: %w", err)
+	}
+	if _, err = io.Copy(part, audioReader); err != nil {
+		return "", fmt.Errorf("ошибка копирования аудиоданных: %w", err)
+	}
+	_ = writer.WriteField("model", "whisper-large-v3")
+	_ = writer.WriteField("language", "ru")
+	_ = writer.WriteField("response_format", "json")
+	if err = writer.Close(); err != nil {
+		return "", fmt.Errorf("ошибка закрытия формы: %w", err)
+	}
+	contentType := writer.FormDataContentType() // например: multipart/form-data; boundary=...
+	bodyBytes := body.Bytes()
+	attempts := len(c.apiKeys)
+	if attempts == 0 {
+		return "", errors.New("список API-ключей Groq пуст")
+	}
+	var lastErr error
+	// 2. Отправляем запрос с ротацией ключей и защитой от 429
+	for i := 0; i < attempts; i++ {
+		apiKey := c.getNextAPIKey()
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.groq.com/openai/v1/audio/transcriptions", bytes.NewReader(bodyBytes))
+		if err != nil {
+			return "", fmt.Errorf("ошибка создания HTTP-запроса к Whisper: %w", err)
+		}
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+		req.Header.Set("Content-Type", contentType)
+		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("ошибка отправки аудио в Groq: %w", err)
+			continue
+		}
+		if resp.StatusCode == http.StatusTooManyRequests {
+			resp.Body.Close()
+			lastErr = fmt.Errorf("ключ исчерпал лимиты (429), пробуем следующий")
+			continue
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			respBody, _ := io.ReadAll(resp.Body)
+			return "", fmt.Errorf("Groq Whisper вернул ошибку (%d): %s", resp.StatusCode, string(respBody))
+		}
+		// 3. Декодируем ответ вида {"text": "расшифрованный текст"}
+		var result struct {
+			Text string `json:"text"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			return "", fmt.Errorf("ошибка декодирования ответа Whisper: %w", err)
+		}
+		return result.Text, nil // УСПЕХ!
+	}
+	return "", fmt.Errorf("все API-ключи недоступны для Whisper: %w", lastErr)
 }

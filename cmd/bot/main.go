@@ -254,6 +254,87 @@ func main() {
 		resMenu.Inline(resMenu.Row(btnNext, btnMenu))
 		return c.Send(resText, resMenu, tele.ModeHTML)
 	})
+	b.Handle(tele.OnVoice, func(c tele.Context) error {
+		state, ok := sessionMgr.ReadState(c.Sender().ID)
+		if !ok {
+			return c.Send("Сначала выберите вопрос для ответа через меню!")
+		}
+		// 2. Сбрасываем состояние, чтобы пользователь не спамил
+		sessionMgr.ClearState(c.Sender().ID)
+		// 3. Достаём объект голосового сообщения
+		voice := c.Message().Voice
+		if voice == nil {
+			return c.Send("Не удалось получить аудиосообщение.")
+		}
+		// 4. Показываем в Telegram статус «записывает аудио / печатает»
+		_ = c.Notify(tele.RecordingAudio)
+		// 5. Скачиваем аудиофайл из Telegram
+		fileReader, err := b.File(&voice.File)
+		if err != nil {
+			log.Printf("Ошибка скачивания аудио: %v", err)
+			return c.Send("Не удалось скачать голосовое сообщение из Telegram.")
+		}
+		defer fileReader.Close()
+		// 6. Распознаем речь через Groq Whisper
+		transcribedText, err := aiClient.Transcribe(context.Background(), fileReader, "voice.ogg")
+		if err != nil {
+			log.Printf("Ошибка транскрибации Groq: %v", err)
+			return c.Send("⚠️ Ошибка распознавания речи: " + err.Error())
+		}
+		if strings.TrimSpace(transcribedText) == "" {
+			return c.Send("🤔 Не удалось разобрать слова. Попробуй записать еще раз четче или отправь текстом.")
+		}
+		// 7. Говорим Telegram, что ментор думает над ответом
+		_ = c.Notify(tele.Typing)
+		userAnswer := transcribedText
+		// 8. Достаем сам вопрос из репозитория
+		q, err := repo.GetQuestionByID(state.QuestionID)
+		if err != nil {
+			return c.Send("Вопрос не найден в базе.")
+		}
+		// 9. Оцениваем ответ через модель Groq
+		eval, err := aiClient.Evaluate(context.Background(), *q, userAnswer)
+		var resText string
+		if err != nil {
+			log.Printf("Ошибка оценки ИИ: %v", err)
+			resText = fmt.Sprintf(
+				"🎙 <b>Твой голосовой ответ:</b>\n<i>«%s»</i>\n\n"+
+					"⚠️ <i>Не удалось получить оценку ментора: %v</i>\n\n"+
+					"📖 <b>Эталонный ответ:</b>\n%s",
+				html.EscapeString(userAnswer),
+				html.EscapeString(err.Error()),
+				html.EscapeString(q.Answer),
+			)
+		} else {
+			status := "🟡 Надо доработать"
+			if eval.IsCorrect {
+				status = "🟢 Ответ зачтен!"
+			}
+			resText = fmt.Sprintf(
+				"🎙 <b>Твой голосовой ответ:</b>\n<i>«%s»</i>\n\n"+
+					"🏆 <b>Оценка ментора: %d / 10</b> (%s)\n\n"+
+					"💡 <b>Разбор ответа:</b>\n%s\n\n",
+				html.EscapeString(userAnswer),
+				eval.Score,
+				status,
+				html.EscapeString(eval.Feedback),
+			)
+			if len(eval.MissingPoints) > 0 {
+				resText += "⚠️ <b>Что ты упустил:</b>\n"
+				for _, mp := range eval.MissingPoints {
+					resText += fmt.Sprintf("• %s\n", html.EscapeString(mp))
+				}
+				resText += "\n"
+			}
+			resText += fmt.Sprintf("📖 <b>Эталонный ответ:</b>\n%s", html.EscapeString(q.Answer))
+		}
+		resMenu := &tele.ReplyMarkup{}
+		btnNext := resMenu.Data("➡️ Другой вопрос", "btn_topic", state.TopicID)
+		btnMenu := resMenu.Data("📚 Все темы", "btn_main_menu")
+		resMenu.Inline(resMenu.Row(btnNext, btnMenu))
+		return c.Send(resText, resMenu, tele.ModeHTML)
+
+	})
 
 	// 8. Корректное завершение работы (Graceful Shutdown)
 	stop := make(chan os.Signal, 1)
