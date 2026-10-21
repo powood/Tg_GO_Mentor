@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 	"sync/atomic"
 	"time"
 )
@@ -25,9 +26,12 @@ type GroqClient struct {
 	apiKeys    []string
 	counter    uint64
 	httpClient *http.Client
+	model      string
+	crassusKey string
 }
 
 func NewGroqClient(apiKeys []string) *GroqClient {
+	crassusKey := os.Getenv("CRASSUS_API_KEY")
 	transport := &http.Transport{}
 	// Если в .env задан прокси — направляем запросы через него
 	proxyStr := os.Getenv("GROQ_PROXY_URL")
@@ -42,6 +46,8 @@ func NewGroqClient(apiKeys []string) *GroqClient {
 			Transport: transport,
 			Timeout:   30 * time.Second,
 		},
+		model:      "qwen/qwen3.8-27b",
+		crassusKey: crassusKey,
 	}
 }
 func (c *GroqClient) getNextAPIKey() string {
@@ -87,6 +93,9 @@ func (c *GroqClient) Evaluate(ctx context.Context, q models.Question, userAnswer
   "feedback": "(краткий конструктивный комментарий (до 2–3 предложений, емко, без воды)",
   "missing_points": ["список ключевых тезисов на русском, которые кандидат забыл упомянуть"]
 }`
+	if c.crassusKey != "" {
+		return c.evaluateCrassus(ctx, q, userAnswer)
+	}
 	userPrompt := fmt.Sprintf(
 		"Вопрос: %s\n\nЭталонный ответ: %s\n\nОбязательные ключевые тезисы: %v\n\nОтвет кандидата: %s",
 		q.Text,
@@ -155,6 +164,94 @@ func (c *GroqClient) Evaluate(ctx context.Context, q models.Question, userAnswer
 		return &evaluation, nil // УСПЕХ!
 	}
 	return nil, fmt.Errorf("все API-ключи недоступны: %w", lastErr)
+}
+
+type anthropicMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+type anthropicRequest struct {
+	Model     string             `json:"model"`
+	MaxTokens int                `json:"max_tokens"`
+	Messages  []anthropicMessage `json:"messages"`
+}
+type anthropicResponse struct {
+	Content []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	} `json:"content"`
+}
+
+func (c *GroqClient) evaluateCrassus(ctx context.Context, q models.Question, userAnswer string) (*models.Evaluation, error) {
+	prompt := fmt.Sprintf(
+		`Ты опытный Senior Go-разработчик и личный технический ментор.
+Оцени ответ ученика и дай ему персональную обратную связь.
+ВАЖНОЕ ПРАВИЛО: Обращайся к собеседнику строго напрямую на «ты» (например: «Ты правильно объяснил...», «Тебе нужно повторить...»). Запрещено использовать третье лицо («кандидат», «он», «автор»)!
+Вопрос: %s
+Эталонный ответ: %s
+Ключевые пункты: %v
+Ответ ученика: %s
+Верни ответ СТРОГО в формате JSON без markdown-разметки (без `+"`"+`):
+{
+  "score": (число от 1 до 10),
+  "is_correct": (true если ответ в целом верный и балл >= 6, иначе false),
+  "feedback": "(разбор на 2-3 предложения на «ты»: что ты ответил круто, а в чём ошибся)",
+  "missing_points": ["пункты, которые ты упустил в своём ответе"]
+}`,
+		q.Text,
+		q.Answer,
+		q.KeyPoints,
+		userAnswer,
+	)
+	reqBody := anthropicRequest{
+		Model:     "deepseek-v4.1-flash",
+		MaxTokens: 800,
+		Messages: []anthropicMessage{
+			{Role: "user", Content: prompt},
+		},
+	}
+	jsonBytes, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("ошибка маршалинга запроса: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://crassusmarket.xyz/v1/messages", bytes.NewReader(jsonBytes))
+	if err != nil {
+		return nil, fmt.Errorf("ошибка создания HTTP-запроса: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-api-key", c.crassusKey)
+	req.Header.Set("anthropic-version", "2023-06-01")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+	// Прямой запрос без прокси для максимальной скорости
+	client := &http.Client{Timeout: 40 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("ошибка отправки запроса к DeepSeek: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("DeepSeek API вернул ошибку (%d): %s", resp.StatusCode, string(body))
+	}
+	var anthropicResp anthropicResponse
+	if err := json.NewDecoder(resp.Body).Decode(&anthropicResp); err != nil {
+		return nil, fmt.Errorf("ошибка парсинга ответа DeepSeek: %w", err)
+	}
+	if len(anthropicResp.Content) == 0 {
+		return nil, errors.New("DeepSeek вернул пустой ответ")
+	}
+	aiText := anthropicResp.Content[0].Text
+	// Очищаем от возможных ```json и пробелов
+	aiText = strings.TrimSpace(aiText)
+	aiText = strings.TrimPrefix(aiText, "```json")
+	aiText = strings.TrimPrefix(aiText, "```")
+	aiText = strings.TrimSuffix(aiText, "```")
+	aiText = strings.TrimSpace(aiText)
+	var evaluation models.Evaluation
+	if err := json.Unmarshal([]byte(aiText), &evaluation); err != nil {
+		return nil, fmt.Errorf("ошибка парсинга JSON оценки: %w\nСырой ответ: %s", err, aiText)
+	}
+	return &evaluation, nil
 }
 
 func (c *GroqClient) Transcribe(ctx context.Context, audioReader io.Reader, filename string) (string, error) {
