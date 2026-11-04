@@ -47,3 +47,4 @@ func TestFormatAnswerHTML_AlreadyWrappedCode(t *testing.T) {
 		t.Fatalf("expected inline code tag, got: %s", formatted)
 	}
 }
+
