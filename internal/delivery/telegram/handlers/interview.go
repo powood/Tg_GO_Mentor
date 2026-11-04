@@ -152,6 +152,10 @@ func RandomQuestion(interviewUC usecase.InterviewUsecase) tele.HandlerFunc {
 			return c.Send("⚠️ Не удалось загрузить случайный вопрос, попробуй ещё раз.")
 		}
 
+		if c.Message() != nil {
+			_, _ = c.Bot().EditReplyMarkup(c.Message(), nil)
+		}
+
 		msg := view.QuestionMessage(q)
 		kb := view.QuestionKeyboard()
 
@@ -182,6 +186,10 @@ func TopicSelect(interviewUC usecase.InterviewUsecase) tele.HandlerFunc {
 			}
 			slog.Error("ошибка старта интервью", "user_id", c.Sender().ID, "topic_id", topicID, "error", err)
 			return c.Send("⚠️ Не удалось начать интервью по этой теме. Попробуй чуть позже.")
+		}
+
+		if c.Message() != nil {
+			_, _ = c.Bot().EditReplyMarkup(c.Message(), nil)
 		}
 
 		msg := view.QuestionMessage(q)
@@ -517,6 +525,10 @@ func StartMultiSprint(userUC usecase.UserUsecase, interviewUC usecase.InterviewU
 			}
 			slog.Error("ошибка старта мульти-спринта", "user_id", c.Sender().ID, "error", err)
 			return c.Send("⚠️ Не удалось запустить спринт по выбранным темам.")
+		}
+
+		if c.Message() != nil {
+			_, _ = c.Bot().EditReplyMarkup(c.Message(), nil)
 		}
 
 		gradeBadge := "🌐 Все уровни"
