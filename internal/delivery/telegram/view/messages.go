@@ -200,8 +200,10 @@ func scoreBar(score int) string {
 	return filled + empty
 }
 
-// formatAnswerHTML переводит блоки ```go ... ``` в <pre><code class="language-go">, безопасно экранируя остальной текст
+// formatAnswerHTML переводит блоки ```go ... ``` в <pre><code class="language-go">, безопасно экранируя остальной текст.
+// Также автоматически распознает и оформляет блоки кода на Go, если бэктики были опущены.
 func formatAnswerHTML(raw string) string {
+	raw = wrapGoBlocksInMarkdown(raw)
 	parts := strings.Split(raw, "```")
 	var out strings.Builder
 
@@ -240,6 +242,98 @@ func formatAnswerHTML(raw string) string {
 	}
 
 	return out.String()
+}
+
+// wrapGoBlocksInMarkdown автоматически оборачивает абзацы с кодом Go в ```go ... ```, если они не были обёрнуты
+func wrapGoBlocksInMarkdown(text string) string {
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	parts := strings.Split(text, "```")
+	modified := false
+
+	for i := 0; i < len(parts); i += 2 {
+		segment := parts[i]
+		rawParagraphs := strings.Split(segment, "\n\n")
+
+		var merged []struct {
+			isCode bool
+			text   string
+		}
+
+		for _, p := range rawParagraphs {
+			trimmed := strings.TrimSpace(p)
+			if trimmed == "" {
+				continue
+			}
+			isCode := isGoCodeParagraph(trimmed)
+			if len(merged) > 0 && merged[len(merged)-1].isCode && isCode {
+				merged[len(merged)-1].text += "\n\n" + trimmed
+			} else {
+				merged = append(merged, struct {
+					isCode bool
+					text   string
+				}{isCode: isCode, text: trimmed})
+			}
+		}
+
+		var newParas []string
+		for _, item := range merged {
+			if item.isCode {
+				newParas = append(newParas, "```go\n"+item.text+"\n```")
+				modified = true
+			} else {
+				newParas = append(newParas, item.text)
+			}
+		}
+		parts[i] = strings.Join(newParas, "\n\n")
+	}
+
+	if modified {
+		return strings.Join(parts, "```")
+	}
+	return text
+}
+
+// isGoCodeParagraph проверяет, похож ли абзац на сниппет кода Go
+func isGoCodeParagraph(p string) bool {
+	lines := strings.Split(strings.TrimSpace(p), "\n")
+	if len(lines) == 0 {
+		return false
+	}
+
+	firstLine := strings.TrimSpace(lines[0])
+	goKeywords := []string{
+		"package ", "import ", "func ", "type ", "const (", "var (",
+	}
+	for _, kw := range goKeywords {
+		if strings.HasPrefix(firstLine, kw) {
+			return true
+		}
+	}
+
+	if strings.Contains(firstLine, "func ") || strings.Contains(firstLine, "struct {") || strings.Contains(firstLine, "interface {") {
+		return true
+	}
+
+	codeScore := 0
+	for _, l := range lines {
+		trimmed := strings.TrimSpace(l)
+		if trimmed == "" {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "//") ||
+			strings.Contains(trimmed, ":=") ||
+			strings.HasPrefix(trimmed, "fmt.") ||
+			strings.HasPrefix(trimmed, "return ") ||
+			strings.HasPrefix(trimmed, "for ") ||
+			strings.HasPrefix(trimmed, "if ") ||
+			trimmed == "}" || trimmed == ")" ||
+			strings.HasSuffix(trimmed, "{") || strings.HasSuffix(trimmed, "(") ||
+			strings.Contains(trimmed, " = iota") {
+			codeScore++
+		}
+	}
+
+	return codeScore >= 1 && float64(codeScore)/float64(len(lines)) >= 0.4
 }
 
 func isSimpleLang(s string) bool {
