@@ -1,0 +1,10 @@
+.git
+.gitignore
+.env*
+*.exe
+*.md
+*.json
+cmd/generator
+cmd/seeder
+_archive/
+bin/
