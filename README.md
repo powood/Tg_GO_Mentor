@@ -1,14 +1,14 @@
-# 🤖 Go Technical Interview Mentor Bot
+#  Go Technical Interview Mentor Bot
 
 Production-ready Telegram-бот для подготовки к техническим собеседованиям по **Golang** (грейды: *Intern*, *Junior*, *Middle*, *Senior*). 
 
 Поддерживает голосовые ответы, симуляцию реального собеседования с наводящими вопросами от ИИ-техлида и алгоритм адаптивного интервального повторения.
 
-👉 **Живой бот в Telegram:** [@go_SikkiMentor_bot](https://t.me/go_SikkiMentor_bot)
+ **Живой бот в Telegram:** [@go_SikkiMentor_bot](https://t.me/go_SikkiMentor_bot)
 
 ---
 
-## ⚡ Ключевые возможности
+##  Ключевые возможности
 
 * **🎙 Голосовые ответы (Voice-First):** Стриминг и транскрибация голосовых сообщений любой длительности через **Deepgram Nova-2 API**.
 * **🧠 AI-ревью ответов:** Оценка ответа по 10-балльной шкале, подробный разбор пробелов и сопоставление с эталонными техническими критериями (на базе DeepSeek / Groq).
